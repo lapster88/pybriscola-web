@@ -1,8 +1,9 @@
-from django.urls import path
+from django.urls import path, re_path
 
-from . import views
+from . import views, consumers
 
 urlpatterns = [
     path('create/', views.create, name='create'),
+
     #path('<str:room_name>/', views.room, name='room'),
 ]
