@@ -24,6 +24,8 @@ class BriscolaClientConsumer(WebsocketConsumer):
         pass
 
     def receive(self, text_data=None, bytes_data=None):
+        """Handles all messages coming from the web client. Typically, dispatches messages to the channel layer to
+        go to another Consumer for """
         message = json.loads(text_data)
         message_type = message['message_type']
         print(message_type)
@@ -47,6 +49,7 @@ class BriscolaClientConsumer(WebsocketConsumer):
              )
 
     def game_update(self, event):
+        """Handles game.update messages coming from BriscolaServerConsumer"""
         message = json.loads(event['message'])
         if message['message_type'] == 'create':
             if message['result'] == 'success':
