@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  web:
+    build:
+      context: .
+    command: >
+      sh -c "python manage.py migrate &&
+             daphne -b 0.0.0.0 -p 8000 pybriscola.asgi:application"
+    volumes:
+      - .:/app
+    working_dir: /app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PROTOCOL_VERSION=1.0.0
+      - DJANGO_SETTINGS_MODULE=pybriscola.settings
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  game:
+    build:
+      context: ../pybriscola-game
+    command: python briscola_service.py
+    working_dir: /app
+    volumes:
+      - ../pybriscola-game:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PROTOCOL_VERSION=1.0.0
+      - GAME_SERVICE_WS_URL=ws://web:8000/ws/gameservice/
+      - GAME_SERVER_WS_URL=ws://web:8000/ws/gameserver/
+    depends_on:
+      - redis

@@ -1,2 +1,6 @@
 channels~=3.0.4
+channels_redis~=3.4
 Django~=4.0.1
+redis~=4.5
+PyJWT~=2.8
+django-allauth~=0.52
