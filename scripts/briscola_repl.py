@@ -152,12 +152,19 @@ class BriscolaRepl:
         """Run the interactive REPL loop."""
         self._print_help()
         while not self._should_exit:
-            line = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: input("briscola> ")
-            )
-            if line is None:
+            try:
+                line = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input("briscola> ")
+                )
+            except (EOFError, KeyboardInterrupt):
+                self._should_exit = True
+                break
+            if not line:
                 continue
-            await self._handle_command(line.strip())
+            try:
+                await self._handle_command(line.strip())
+            except Exception as exc:  # pragma: no cover - runtime safety
+                print(f"[error] {exc}")
         await self.close()
 
     async def _handle_command(self, line: str) -> None:
@@ -180,8 +187,14 @@ class BriscolaRepl:
             await self.bootstrap(self._parse_optional_int(args, 0) or None)
             return
         if command == "join":
+            if not args:
+                print("join requires at least one <player_id>")
+                return
             for raw in args:
-                await self.join_player(int(raw))
+                pid = self._safe_int(raw, "player_id")
+                if pid is None:
+                    continue
+                await self.join_player(pid)
             return
         if command == "players":
             self._print_players()
@@ -203,6 +216,9 @@ class BriscolaRepl:
             return
         if command == "reorder":
             await self._send_reorder(args)
+            return
+        if command in {"end", "delete"}:
+            await self._end_game()
             return
 
         print(f"Unknown command '{command}'. Type 'help' for options.")
@@ -305,6 +321,13 @@ Available commands:
         except (IndexError, ValueError):
             return None
 
+    def _safe_int(self, raw: str, label: str) -> Optional[int]:
+        try:
+            return int(raw)
+        except ValueError:
+            print(f"[error] {label} must be an integer; got '{raw}'")
+            return None
+
     def _require_player_arg(self, args: List[str]) -> int:
         if not args:
             raise ValueError("Command requires a <player_id> argument")
@@ -328,6 +351,23 @@ Available commands:
                 await session.websocket.close()
         self.players.clear()
         print("Closed all player sessions.")
+
+    async def _end_game(self) -> None:
+        if not self.game_id or not self.host_token:
+            print("[error] No active game/host token to end.")
+            return
+        try:
+            await self._post_json(
+                f"{self.http_base}/briscola/game/{self.game_id}/delete/",
+                body={},
+                headers={"Authorization": f"Bearer {self.host_token}"},
+            )
+            print(f"Ended game {self.game_id}.")
+            await self.close()
+            self.game_id = None
+            self.host_token = None
+        except Exception as exc:
+            print(f"[error] Failed to end game: {exc}")
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -509,4 +549,4 @@ def describe_message(message: Dict[str, object]) -> str:
         reason = body.get("reason")
         return f"Error {code}: {reason or 'no reason provided'}."
 
-    return json.dumps(message, indent=2)
+        return json.dumps(message, indent=2)

@@ -54,6 +54,8 @@ def create(request):
     game_id = id_generator()
     exp_minutes = int(request.GET.get('ttl', 60))
     host_token = _mint_token(game_id, role='host', ttl_minutes=exp_minutes)
+    client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    client.publish(f"game.{game_id}.control", json.dumps({"command": "create", "game_id": game_id}))
     return JsonResponse({
         'game_id': game_id,
         'host_token': host_token,
@@ -176,3 +178,29 @@ def join_observer(request, game_id):
         "ttl_minutes": ttl_minutes,
         "role": "observer",
     })
+
+
+@require_http_methods(["POST", "DELETE"])
+def delete_game(request, game_id):
+    """
+    End a game: require host token, clear Redis state/heartbeat keys.
+    """
+    _, err = _require_host(request, game_id)
+    if err:
+        return err
+    client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    # signal game service to stop the server
+    client.publish(f"game.{game_id}.control", json.dumps({"command": "stop", "game_id": game_id}))
+    client.publish(f"game.{game_id}.events", json.dumps({"message_type": "game.ended", "game_id": game_id}))
+    return JsonResponse({"status": "deleted", "game_id": game_id})
+
+
+@require_http_methods(["POST"])
+def sync_game(request, game_id):
+    """Request a sync snapshot broadcast via control channel (host token required)."""
+    _, err = _require_host(request, game_id)
+    if err:
+        return err
+    client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    client.publish(f"game.{game_id}.control", json.dumps({"command": "sync", "game_id": game_id}))
+    return JsonResponse({"status": "sync_requested", "game_id": game_id})
