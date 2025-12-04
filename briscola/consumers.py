@@ -1,6 +1,7 @@
 import json
 import time
 import threading
+import logging
 
 import jwt
 import redis
@@ -14,6 +15,7 @@ PROTOCOL_VERSION = getattr(settings, 'PROTOCOL_VERSION', '1.0.0')
 REDIS_URL = getattr(settings, 'REDIS_URL', 'redis://127.0.0.1:6379/0')
 REDIS_PREFIX = 'game'
 ACTIVE_CONNECTIONS = {}  # (game_id, player_id) -> channel_name
+logger = logging.getLogger(__name__)
 
 class BriscolaClientConsumer(WebsocketConsumer):
     def __init__(self, *args, **kwargs):
@@ -29,12 +31,8 @@ class BriscolaClientConsumer(WebsocketConsumer):
         # TODO: set game_server_id_name / routing key when a player joins a specific game
 
     def connect(self):
-        print(self.scope['user'])
-
-        # if self.scope['user'].is_authenticated:
         self.accept()
-        # else:
-        #     self.close()
+        logger.debug("Websocket connected channel=%s", self.channel_name)
 
     def disconnect(self, code):
         self.stop_event.set()
@@ -46,6 +44,7 @@ class BriscolaClientConsumer(WebsocketConsumer):
         if self.pubsub_thread and self.pubsub_thread.is_alive():
             self.pubsub_thread.join(timeout=1)
         self.unregister_connection()
+        logger.debug("Websocket disconnected channel=%s code=%s", self.channel_name, code)
 
     def receive(self, text_data=None, bytes_data=None):
         """Handles all messages coming from the web client. Typically, dispatches messages to the channel layer to
@@ -86,6 +85,7 @@ class BriscolaClientConsumer(WebsocketConsumer):
             claims = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         except Exception as exc:  # pylint: disable=broad-except
             self.send_action_result(message, code='unauthorized', reason=f'Invalid token: {exc}')
+            logger.warning("Invalid token on join: %s", exc)
             return
 
         game_id = message.get('game_id') or claims.get('game_id')
@@ -103,6 +103,9 @@ class BriscolaClientConsumer(WebsocketConsumer):
             return
         if role == 'observer':
             player_id = None
+        if role not in ('player', 'observer'):
+            self.send_action_result(message, code='unauthorized', reason='Unsupported role')
+            return
 
         # Handle duplicate connections (new connection wins)
         key = (game_id, player_id)
@@ -113,10 +116,13 @@ class BriscolaClientConsumer(WebsocketConsumer):
                 prior_channel,
                 {'type': 'force.disconnect'}
             )
+            logger.info("Duplicate connection takeover game=%s player=%s new=%s old=%s",
+                        game_id, player_id, self.channel_name, prior_channel)
 
         self.game_id = game_id
         self.player_id = player_id
         self.role = role
+        logger.info("Join accepted game=%s player=%s role=%s channel=%s", game_id, player_id, role, self.channel_name)
 
         self.start_event_listener()
         self.publish_action(message, claims)
@@ -128,6 +134,7 @@ class BriscolaClientConsumer(WebsocketConsumer):
         envelope = self.build_envelope(message, claims)
         channel = f'{REDIS_PREFIX}.{envelope["game_id"]}.actions'
         self.redis.publish(channel, json.dumps(envelope))
+        logger.debug("Published action to %s type=%s", channel, envelope.get('message_type'))
 
     def build_envelope(self, message, claims=None):
         """Wrap an action with envelope fields expected by game servers."""
@@ -166,29 +173,31 @@ class BriscolaClientConsumer(WebsocketConsumer):
             return
         self.pubsub = self.redis.pubsub()
         self.pubsub.subscribe(f'{REDIS_PREFIX}.{self.game_id}.events')
+        logger.debug("Subscribed to %s.%s.events", REDIS_PREFIX, self.game_id)
 
         def _listen():
             while not self.stop_event.is_set():
-                for msg in self.pubsub.listen():
-                    if self.stop_event.is_set():
-                        break
-                    if msg.get('type') != 'message':
-                        continue
-                    data = msg.get('data')
-                    try:
-                        if isinstance(data, bytes):
-                            data = data.decode()
-                        event = json.loads(data)
-                    except Exception:  # pylint: disable=broad-except
-                        continue
-                    async_to_sync(self.channel_layer.send)(
-                        self.channel_name,
-                        {
-                            'type': 'redis.event',
-                            'event': event
-                        }
-                    )
-                time.sleep(0.01)
+                msg = self.pubsub.get_message(timeout=0.01)
+                if msg is None:
+                    continue
+                if self.stop_event.is_set():
+                    break
+                if msg.get('type') != 'message':
+                    continue
+                data = msg.get('data')
+                try:
+                    if isinstance(data, bytes):
+                        data = data.decode()
+                    event = json.loads(data)
+                except Exception:  # pylint: disable=broad-except
+                    continue
+                async_to_sync(self.channel_layer.send)(
+                    self.channel_name,
+                    {
+                        'type': 'redis.event',
+                        'event': event
+                    }
+                )
 
         self.pubsub_thread = threading.Thread(target=_listen, daemon=True)
         self.pubsub_thread.start()

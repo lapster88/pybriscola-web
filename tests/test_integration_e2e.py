@@ -21,7 +21,16 @@ async def test_join_round_trip_with_game_server():
     assert resp.status_code == 200
     data = resp.json()
     game_id = data["game_id"]
-    token = data["players"][0]["token"]
+    host_token = data["host_token"]
+
+    issue_resp = client.post(
+        f"/briscola/token/{game_id}/",
+        data='{"role": "player", "player_id": 0}',
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {host_token}",
+    )
+    assert issue_resp.status_code == 200
+    token = issue_resp.json()["token"]
 
     communicator = WebsocketCommunicator(application, "/ws/client/")
     connected, _ = await communicator.connect()

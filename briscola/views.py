@@ -1,58 +1,113 @@
 import datetime
 import json
 import random
-import string
 
 import jwt
+import redis
 from django.conf import settings
-from django.http import JsonResponse, HttpResponseBadRequest
+from django.http import JsonResponse, HttpResponseBadRequest, HttpResponseForbidden
+from django.views.decorators.http import require_http_methods
 
 
-def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
-    """Generate a random game id."""
+def id_generator(size=6):
+    """Generate a random uppercase/digit game id."""
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return ''.join(random.choice(chars) for _ in range(size))
 
 
+def _mint_token(game_id, role, ttl_minutes, player_id=None, display_name=None):
+    payload = {
+        'game_id': game_id,
+        'role': role,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=ttl_minutes),
+    }
+    if player_id is not None:
+        payload['player_id'] = player_id
+    if display_name:
+        payload['display_name'] = display_name
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+
+
+def _require_host(request, game_id):
+    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+    prefix = 'Bearer '
+    if not auth_header.startswith(prefix):
+        return None, HttpResponseForbidden('Missing host token')
+    token = auth_header[len(prefix):]
+    try:
+        claims = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+    except jwt.ExpiredSignatureError:
+        return None, HttpResponseForbidden('Host token expired')
+    except jwt.InvalidTokenError:
+        return None, HttpResponseForbidden('Invalid host token')
+    if claims.get('role') != 'host' or claims.get('game_id') != game_id:
+        return None, HttpResponseForbidden('Host token mismatch')
+    return claims, None
+
+
+@require_http_methods(["POST", "GET"])
 def create(request):
     """
-    Create a new game and issue player/observer tokens.
+    Create a new game and issue a host token.
+    Host token can later mint player/observer tokens via /briscola/token/<game_id>/.
     """
-    if request.method not in ['POST', 'GET']:
-        return HttpResponseBadRequest('Unsupported method')
-
     game_id = id_generator()
     exp_minutes = int(request.GET.get('ttl', 60))
-
-    def mint(role, player_id=None):
-        payload = {
-            'game_id': game_id,
-            'role': role,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=exp_minutes),
-        }
-        if player_id is not None:
-            payload['player_id'] = player_id
-        return jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
-
-    players = [
-        {'player_id': pid, 'token': mint('player', player_id=pid)}
-        for pid in range(5)
-    ]
-    observer_token_value = mint('observer')
+    host_token = _mint_token(game_id, role='host', ttl_minutes=exp_minutes)
     return JsonResponse({
         'game_id': game_id,
-        'players': players,
-        'observer_token': observer_token_value,
+        'host_token': host_token,
         'ttl_minutes': exp_minutes,
     })
 
 
+@require_http_methods(["POST"])
+def issue_token(request, game_id):
+    """
+    Issue a player or observer token. Requires Host auth (Bearer host_token).
+    Body: JSON { role: "player"|"observer", player_id?, display_name?, ttl_minutes? }
+    """
+    _, err = _require_host(request, game_id)
+    if err:
+        return err
+
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError as e:
+        return HttpResponseBadRequest(f'Invalid JSON: {str(e)}')
+
+    role = body.get('role')
+    if role not in ('player', 'observer'):
+        return HttpResponseBadRequest('Invalid role')
+    player_id = body.get('player_id')
+    if role == 'player' and player_id is None:
+    try:
+        ttl_minutes = int(body.get('ttl_minutes', 60))
+    except (ValueError, TypeError):
+        return HttpResponseBadRequest('ttl_minutes must be an integer')
+    display_name = body.get('display_name')
+    token = _mint_token(
+        game_id,
+        role=role,
+        ttl_minutes=ttl_minutes,
+        player_id=player_id,
+        display_name=display_name,
+    )
+    return JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
+    )
+    return JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
+
+
 def observer_token(request, game_id):
     """
-    Issue a signed observer token for the given game_id.
-    Accepts optional display_name (query param or JSON body).
+    Deprecated: retained for compatibility; requires host token in Authorization header.
     """
     if request.method not in ['GET', 'POST']:
         return HttpResponseBadRequest('Unsupported method')
+
+    _, err = _require_host(request, game_id)
+    if err:
+        return err
 
     display_name = request.GET.get('display_name')
     if request.body:
@@ -63,11 +118,20 @@ def observer_token(request, game_id):
             pass
 
     exp_minutes = int(request.GET.get('ttl', 60))
-    payload = {
-        'game_id': game_id,
-        'role': 'observer',
-        'display_name': display_name,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=exp_minutes)
-    }
-    token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+    token = _mint_token(game_id, role='observer', ttl_minutes=exp_minutes, display_name=display_name)
     return JsonResponse({'token': token, 'ttl_minutes': exp_minutes})
+
+
+    # Module-level Redis client using connection pool
+    redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    
+    def health_check(request):
+        """
+        Health check endpoint for Redis connectivity.
+        """
+        try:
+            redis_client.ping()
+            redis_ok = True
+        except (redis.ConnectionError, redis.TimeoutError, Exception):
+            redis_ok = False
+        return JsonResponse({"status": "ok" if redis_ok else "degraded", "redis": redis_ok})
