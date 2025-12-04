@@ -6,6 +6,7 @@ import jwt
 import redis
 from django.conf import settings
 from django.http import JsonResponse, HttpResponseBadRequest, HttpResponseForbidden
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 
@@ -29,6 +30,7 @@ def _mint_token(game_id, role, ttl_minutes, player_id=None, display_name=None):
 
 
 def _require_host(request, game_id):
+    # Enforce bearer token auth; ignore session cookies to reduce CSRF surface
     auth_header = request.META.get('HTTP_AUTHORIZATION', '')
     prefix = 'Bearer '
     if not auth_header.startswith(prefix):
@@ -45,8 +47,23 @@ def _require_host(request, game_id):
     return claims, None
 
 
+def _cors_response(request, response):
+    origin = request.META.get("HTTP_ORIGIN")
+    allowed = getattr(settings, "CORS_ALLOWED_ORIGINS", [])
+    if origin and ("*" in allowed or origin in allowed):
+        response["Access-Control-Allow-Origin"] = origin
+    if request.method == "OPTIONS":
+        response["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    response["Vary"] = "Origin"
+    return response
+
+
+@csrf_exempt  # API is token-based; we bypass CSRF for non-session use
 @require_http_methods(["POST", "GET"])
 def create(request):
+    if request.method == "OPTIONS":
+        return _cors_response(request, JsonResponse({}, status=200))
     """
     Create a new game and issue a host token.
     Host token can later mint player/observer tokens via /briscola/token/<game_id>/.
@@ -54,15 +71,19 @@ def create(request):
     game_id = id_generator()
     exp_minutes = int(request.GET.get('ttl', 60))
     host_token = _mint_token(game_id, role='host', ttl_minutes=exp_minutes)
-    return JsonResponse({
+    resp = JsonResponse({
         'game_id': game_id,
         'host_token': host_token,
         'ttl_minutes': exp_minutes,
     })
+    return _cors_response(request, resp)
 
 
+@csrf_exempt  # API is token-based; we bypass CSRF for non-session use
 @require_http_methods(["POST"])
 def issue_token(request, game_id):
+    if request.method == "OPTIONS":
+        return _cors_response(request, JsonResponse({}, status=200))
     """
     Issue a player or observer token. Requires Host auth (Bearer host_token).
     Body: JSON { role: "player"|"observer", player_id?, display_name?, ttl_minutes? }
@@ -94,7 +115,8 @@ def issue_token(request, game_id):
         player_id=player_id,
         display_name=display_name,
     )
-    return JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
+    resp = JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
+    return _cors_response(request, resp)
 
 
 def observer_token(request, game_id):
@@ -154,8 +176,11 @@ def game_status(request, game_id):
     })
 
 
+@csrf_exempt  # API is token-based; we bypass CSRF for non-session use
 @require_http_methods(["POST"])
 def join_observer(request, game_id):
+    if request.method == "OPTIONS":
+        return _cors_response(request, JsonResponse({}, status=200))
     """
     Client-facing observer join: issues an observer token for a game_id without host auth.
     Suitable for shareable links; no limits on observers per spec.
@@ -170,9 +195,10 @@ def join_observer(request, game_id):
     except (ValueError, TypeError):
         ttl_minutes = 60
     token = _mint_token(game_id, role='observer', ttl_minutes=ttl_minutes, display_name=display_name)
-    return JsonResponse({
+    resp = JsonResponse({
         "game_id": game_id,
         "token": token,
         "ttl_minutes": ttl_minutes,
         "role": "observer",
     })
+    return _cors_response(request, resp)

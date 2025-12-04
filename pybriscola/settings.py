@@ -26,7 +26,11 @@ SECRET_KEY = 'django-insecure-!&xbj3z90a7ewixy$e_y&u^h46pkm+g9as@^9wfxc2niz!rtle
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
+CSRF_TRUSTED_ORIGINS = os.environ.get("CSRF_TRUSTED_ORIGINS", "http://localhost:8080,http://frontend:8080").split(",")
+CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080,http://frontend:8080").split(",")
+# Keep sessions out of the token-only API surface
+SESSION_COOKIE_SAMESITE = "Lax"
 
 
 # Application definition
