@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.0/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -52,6 +53,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -78,14 +80,19 @@ WSGI_APPLICATION = 'pybriscola.wsgi.application'
 
 ASGI_APPLICATION = 'pybriscola.asgi.application'
 
+# Redis / channel layer configuration
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
 CHANNEL_LAYERS = {
     'default': {
         'BACKEND': 'channels_redis.core.RedisChannelLayer',
         'CONFIG': {
-            "hosts": [('127.0.0.1', 6379)],
+            "hosts": [REDIS_URL],
         },
     },
 }
+
+# Protocol version
+PROTOCOL_VERSION = os.environ.get('PROTOCOL_VERSION', '1.0.0')
 
 # Database
 # https://docs.djangoproject.com/en/4.0/ref/settings/#databases
