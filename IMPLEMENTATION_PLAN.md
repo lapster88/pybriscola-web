@@ -12,7 +12,7 @@
 - Replace the second WebSocket hop with Redis channel-layer bridging:
   - Publish player actions to a per-game channel (e.g., `game.<game_id>.actions`), include `action_id`, `ts`, `version`, `origin:"web"`, and signed claims.
   - Subscribe to per-game events channel (e.g., `game.<game_id>.events`) and broadcast to clients + reply with `action.result` to the originator.
-- Define per-game routing to the correct GameServer via these channels (set up subscriptions on join).
+  - Game service only creates/starts per-game servers and monitors heartbeats; per-game servers consume actions and publish events.
 - Handle actions: `bid`, `call-partner-rank`, `call-partner-suit`, `play`, `reorder`, `sync`.
 - Send `action.result` (status ok/error with codes) and broadcast authoritative events (`trick.played`, `trick.won`, `phase.change`, `hand.update`, `score.update`, `player.join/leave/reconnect`).
 - Observer flow: accept observer tokens; never send hands.
