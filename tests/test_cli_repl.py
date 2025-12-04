@@ -152,7 +152,7 @@ class TestDescribeMessage:
         }
         result = describe_message(msg)
         # Should be compact (no spaces after colons/commas) and sorted
-        assert " " not in result or result.count(" ") == 0
+        assert " " not in result
         # Check it's valid JSON
         import json
         parsed = json.loads(result)

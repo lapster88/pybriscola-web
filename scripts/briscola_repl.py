@@ -247,8 +247,8 @@ class BriscolaREPL:
             return
 
         if cmd == "bootstrap":
-            n = self._parse_optional_int(args, 0)
-            await self.bootstrap(n if n is not None else None)
+            n = self._parse_optional_int(args)
+            await self.bootstrap(n)
             return
 
         if cmd == "bid":
