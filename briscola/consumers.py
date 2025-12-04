@@ -177,27 +177,26 @@ class BriscolaClientConsumer(WebsocketConsumer):
 
         def _listen():
             while not self.stop_event.is_set():
-                msg = self.pubsub.get_message(timeout=0.01)
-                if msg is None:
-                    continue
-                if self.stop_event.is_set():
-                    break
-                if msg.get('type') != 'message':
-                    continue
-                data = msg.get('data')
-                try:
-                    if isinstance(data, bytes):
-                        data = data.decode()
-                    event = json.loads(data)
-                except Exception:  # pylint: disable=broad-except
-                    continue
-                async_to_sync(self.channel_layer.send)(
-                    self.channel_name,
-                    {
-                        'type': 'redis.event',
-                        'event': event
-                    }
-                )
+                for msg in self.pubsub.listen():
+                    if self.stop_event.is_set():
+                        break
+                    if msg.get('type') != 'message':
+                        continue
+                    data = msg.get('data')
+                    try:
+                        if isinstance(data, bytes):
+                            data = data.decode()
+                        event = json.loads(data)
+                    except Exception:  # pylint: disable=broad-except
+                        continue
+                    async_to_sync(self.channel_layer.send)(
+                        self.channel_name,
+                        {
+                            'type': 'redis.event',
+                            'event': event
+                        }
+                    )
+                time.sleep(0.001)
 
         self.pubsub_thread = threading.Thread(target=_listen, daemon=True)
         self.pubsub_thread.start()

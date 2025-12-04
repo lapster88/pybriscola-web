@@ -65,3 +65,30 @@ def test_health_endpoint_checks_redis():
     data = resp.json()
     assert data["status"] in ("ok", "degraded")
     assert "redis" in data
+
+
+@pytest.mark.django_db
+def test_game_status():
+    client = Client()
+    resp = client.get("/briscola/game/TEST01/status/")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["game_id"] == "TEST01"
+    assert "redis" in data
+    assert "observers_open" in data
+
+
+@pytest.mark.django_db
+def test_join_observer_mints_token_without_host():
+    client = Client()
+    resp = client.post(
+        "/briscola/join/observer/TEST01/",
+        data=json.dumps({"display_name": "Ann", "ttl_minutes": 15}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    claims = jwt.decode(data["token"], settings.SECRET_KEY, algorithms=["HS256"])
+    assert claims["role"] == "observer"
+    assert claims["game_id"] == "TEST01"
+    assert claims["display_name"] == "Ann"

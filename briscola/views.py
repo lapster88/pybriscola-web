@@ -81,6 +81,7 @@ def issue_token(request, game_id):
         return HttpResponseBadRequest('Invalid role')
     player_id = body.get('player_id')
     if role == 'player' and player_id is None:
+        return HttpResponseBadRequest('player_id required for player token')
     try:
         ttl_minutes = int(body.get('ttl_minutes', 60))
     except (ValueError, TypeError):
@@ -92,8 +93,6 @@ def issue_token(request, game_id):
         ttl_minutes=ttl_minutes,
         player_id=player_id,
         display_name=display_name,
-    )
-    return JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
     )
     return JsonResponse({'token': token, 'ttl_minutes': ttl_minutes})
 
@@ -122,16 +121,58 @@ def observer_token(request, game_id):
     return JsonResponse({'token': token, 'ttl_minutes': exp_minutes})
 
 
-    # Module-level Redis client using connection pool
-    redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
-    
-    def health_check(request):
-        """
-        Health check endpoint for Redis connectivity.
-        """
-        try:
-            redis_client.ping()
-            redis_ok = True
-        except (redis.ConnectionError, redis.TimeoutError, Exception):
-            redis_ok = False
-        return JsonResponse({"status": "ok" if redis_ok else "degraded", "redis": redis_ok})
+@require_http_methods(["GET"])
+def health(request):
+    """
+    Basic health check: verifies web process is up and can reach Redis.
+    """
+    try:
+        client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        client.ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+    return JsonResponse({"status": "ok" if redis_ok else "degraded", "redis": redis_ok})
+
+
+@require_http_methods(["GET"])
+def game_status(request, game_id):
+    """
+    Lightweight status/metadata for a game_id. For now, returns redis reachability and echoes the id.
+    """
+    redis_ok = False
+    try:
+        client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        client.ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+    return JsonResponse({
+        "game_id": game_id,
+        "redis": redis_ok,
+        "observers_open": True,
+    })
+
+
+@require_http_methods(["POST"])
+def join_observer(request, game_id):
+    """
+    Client-facing observer join: issues an observer token for a game_id without host auth.
+    Suitable for shareable links; no limits on observers per spec.
+    """
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        body = {}
+    display_name = body.get("display_name")
+    try:
+        ttl_minutes = int(body.get("ttl_minutes", request.GET.get("ttl", 60)))
+    except (ValueError, TypeError):
+        ttl_minutes = 60
+    token = _mint_token(game_id, role='observer', ttl_minutes=ttl_minutes, display_name=display_name)
+    return JsonResponse({
+        "game_id": game_id,
+        "token": token,
+        "ttl_minutes": ttl_minutes,
+        "role": "observer",
+    })
