@@ -35,3 +35,7 @@ test-integration:
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d redis game
 	$(COMPOSE) -f $(COMPOSE_FILE) run --rm -e INTEGRATION_E2E=1 web python -m pytest tests/test_integration_e2e.py
 	$(COMPOSE) -f $(COMPOSE_FILE) down
+
+cli:
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d redis web game
+	$(COMPOSE) -f $(COMPOSE_FILE) run --rm web python scripts/briscola_repl.py --http-base http://web:8000 --ws-url ws://web:8000/ws/client/

@@ -76,6 +76,9 @@ class PlayerSession:
     token: str
     websocket: Optional["WebSocketClientProtocol"] = None
     listener: Optional[asyncio.Task] = None
+    inbox: asyncio.Queue = None  # populated at join time
+    seen_actions: set = None  # track action_ids we've printed for this session
+    sent_actions: set = None  # track action_ids we initiated
 
 
 class BriscolaRepl:
@@ -130,10 +133,17 @@ class BriscolaRepl:
         )
         await connection.send(json.dumps(join_payload))
 
-        session = PlayerSession(player_id=player_id, token=token, websocket=connection)
+        session = PlayerSession(
+            player_id=player_id,
+            token=token,
+            websocket=connection,
+            inbox=asyncio.Queue(),
+            seen_actions=set(),
+            sent_actions=set(),
+        )
         session.listener = asyncio.create_task(self._listen_to_player(session))
         self.players[player_id] = session
-        print(f"Player {player_id} joined game {self.game_id}.")
+        print(f"Player {player_id} joined game {self.game_id}. Listening for messages...")
 
     async def _listen_to_player(self, session: PlayerSession) -> None:
         prefix = f"[player {session.player_id}]"
@@ -144,9 +154,33 @@ class BriscolaRepl:
                 except json.JSONDecodeError:
                     print(prefix, raw)
                     continue
-                print(prefix, describe_message(message))
+                # filter duplicates by action_id
+                action_id = message.get("action_id") or message.get("payload", {}).get("action_id")
+                if action_id and session.seen_actions is not None:
+                    if action_id in session.seen_actions:
+                        continue
+                    session.seen_actions.add(action_id)
+                # skip targeted messages for other players / actions we didn't send
+                target_pid = message.get("player_id") or message.get("payload", {}).get("player_id")
+                message_type = message.get("message_type") or message.get("payload", {}).get("message_type")
+                if message_type in {"action.result", "hand.update", "sync"}:
+                    if target_pid is not None and target_pid != session.player_id:
+                        continue
+                    if action_id and session.sent_actions is not None and action_id not in session.sent_actions and target_pid != session.player_id:
+                        continue
+                try:
+                    desc = describe_message(message)
+                except Exception as exc:  # pragma: no cover - runtime safety
+                    desc = f"(error describing message: {exc})"
+                print(prefix, desc)
+                try:
+                    session.inbox.put_nowait(message)
+                except Exception:
+                    pass
         except websockets.ConnectionClosed as exc:  # pragma: no cover - runtime
             print(prefix, f"connection closed ({exc.code})")
+        except Exception as exc:  # pragma: no cover - runtime
+            print(prefix, f"listener error: {exc}")
 
     async def repl(self) -> None:
         """Run the interactive REPL loop."""
@@ -220,6 +254,9 @@ class BriscolaRepl:
         if command in {"end", "delete"}:
             await self._end_game()
             return
+        if command in {"hand", "show-hand"}:
+            await self._show_hand(args)
+            return
 
         print(f"Unknown command '{command}'. Type 'help' for options.")
 
@@ -254,6 +291,10 @@ class BriscolaRepl:
         cards = [parse_card_token(token) for token in args[1:]]
         await self._send_action(player_id, "reorder", hand=cards)
 
+    async def _show_hand(self, args: List[str]) -> None:
+        player_id = self._require_player_arg(args)
+        await self._send_action(player_id, "sync")
+
     async def _send_action(self, player_id: int, message_type: str, **payload) -> None:
         if self.game_id is None:
             raise RuntimeError("No game created yet. Use create or bootstrap first.")
@@ -264,7 +305,40 @@ class BriscolaRepl:
             message_type, self.game_id, player_id=player_id, **payload
         )
         await session.websocket.send(json.dumps(message))
+        if session.sent_actions is not None and message.get("action_id"):
+            session.sent_actions.add(message["action_id"])
         print(f"Sent {message_type} for player {player_id} ({payload or 'no payload'}).")
+        # Try to show immediate response(s) if available
+        hand_shown = False
+        end_time = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < end_time:
+            try:
+                resp = await asyncio.wait_for(session.inbox.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            print(f"[player {player_id}] {describe_message(resp)}")
+            resp_type = resp.get("message_type") if isinstance(resp, dict) else None
+            if resp_type is None and isinstance(resp, dict) and isinstance(resp.get("payload"), dict):
+                resp_type = resp["payload"].get("message_type")
+            effects = None
+            if isinstance(resp, dict):
+                if isinstance(resp.get("effects"), dict):
+                    effects = resp.get("effects")
+                elif isinstance(resp.get("payload"), dict) and isinstance(resp["payload"].get("effects"), dict):
+                    effects = resp["payload"]["effects"]
+            snap = effects.get("snapshot") if isinstance(effects, dict) else None
+            if message_type == "sync" and isinstance(snap, dict):
+                # Render a full sync summary including hand
+                snap_msg = {"message_type": "sync", **snap}
+                print(f"[player {player_id}] {describe_message(snap_msg)}")
+                hand_cards = snap.get("hand") or []
+                if hand_cards:
+                    hand_str = ", ".join(f"{c.get('rank')} of {c.get('suit')}" for c in hand_cards)
+                    print(f"[player {player_id}] hand: {hand_str}")
+                hand_shown = True
+                break
+        if message_type == "sync" and not hand_shown:
+            print("[info] Hand not received within timeout; check listener output.")
 
     def _value_key(self, message_type: str) -> str:
         if message_type == "bid":
@@ -413,12 +487,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(0)
 
 
-if __name__ == "__main__":
-    main()
-
-
 def describe_message(message: Dict[str, object]) -> str:
     """Render a websocket message in a human-readable, single-line format."""
+    if not isinstance(message, dict):
+        return str(message)
 
     def _payload(msg: Dict[str, object]) -> Dict[str, object]:
         nested = msg.get("payload")
@@ -431,7 +503,9 @@ def describe_message(message: Dict[str, object]) -> str:
         return msg
 
     body = _payload(message)
-    message_type = body.get("message_type")
+    message_type = None
+    if isinstance(body, dict):
+        message_type = body.get("message_type") or (body.get("payload", {}).get("message_type") if isinstance(body.get("payload"), dict) else None)
 
     def _card(card: Optional[Dict[str, object]]) -> str:
         if not isinstance(card, dict):
@@ -447,6 +521,20 @@ def describe_message(message: Dict[str, object]) -> str:
         if not isinstance(cards, list):
             return "(unknown hand)"
         return ", ".join(_card(c) for c in cards) or "(empty hand)"
+
+    def _scores(scores: Optional[List[Dict[str, object]]]) -> str:
+        if not isinstance(scores, list):
+            return "(unknown scores)"
+        return ", ".join(
+            f"p{entry.get('player_id')}: {entry.get('points')}" for entry in scores
+        )
+
+    def _trick(trick_cards: Optional[List[Dict[str, object]]]) -> str:
+        if not isinstance(trick_cards, list):
+            return "(unknown trick)"
+        return ", ".join(
+            f"p{entry.get('player_id')} {_card(entry.get('card'))}" for entry in trick_cards
+        )
 
     def _scores(scores: Optional[List[Dict[str, object]]]) -> str:
         if not isinstance(scores, list):
@@ -537,11 +625,35 @@ def describe_message(message: Dict[str, object]) -> str:
     if message_type == "sync":
         phase = body.get("phase") or body.get("state", {}).get("phase")
         current = body.get("current_player_id") or body.get("state", {}).get("current_player_id")
+        leader = body.get("current_leader_id")
+        trump = body.get("trump_suit")
+        caller = body.get("caller_id")
+        partner = body.get("partner_id")
+        bids = body.get("bids") or []
+        scores = body.get("scores") or []
+        trick = body.get("trick") or []
+        hand = body.get("hand")
         parts = ["Sync snapshot"]
         if phase:
             parts.append(f"phase: {phase}")
         if current is not None:
             parts.append(f"current player: {current}")
+        if leader is not None:
+            parts.append(f"leader: {leader}")
+        if trump:
+            parts.append(f"trump: {trump}")
+        if caller is not None:
+            parts.append(f"caller: {caller}")
+        if partner is not None:
+            parts.append(f"partner: {partner}")
+        if bids:
+            parts.append("bids: " + ", ".join(f"p{b.get('player_id')}: {b.get('bid')}" for b in bids))
+        if scores:
+            parts.append("scores: " + _scores(scores))
+        if trick:
+            parts.append("trick: " + _trick(trick))
+        if hand is not None:
+            parts.append("hand: " + _hand(hand))
         return "; ".join(parts) + "."
 
     if message_type == "error":
@@ -549,4 +661,9 @@ def describe_message(message: Dict[str, object]) -> str:
         reason = body.get("reason")
         return f"Error {code}: {reason or 'no reason provided'}."
 
-        return json.dumps(message, indent=2)
+    compact = json.dumps(body if isinstance(body, dict) else message, sort_keys=True)
+    return f"{message_type or 'message'}: {compact}"
+
+
+if __name__ == "__main__":
+    main()
